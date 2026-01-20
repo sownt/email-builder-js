@@ -1,0 +1,85 @@
+name: Publish to NPM
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (leave empty to use package.json versions)'
+        required: false
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'npm'
+          cache-dependency-path: './package-lock.json'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Update package names to @sownt scope
+        run: |
+          # Update all package.json files to use @sownt scope
+          find packages -name "package.json" -type f | while read -r file; do
+            echo "Updating $file"
+            sed -i 's|"@usewaypoint/|"@sownt/|g' "$file"
+          done
+          
+          # Show changes
+          echo "Updated package names:"
+          find packages -name "package.json" -type f -exec grep -H '"name":' {} \;
+      
+      - name: Build all packages
+        run: npm run build --workspaces
+      
+      - name: Publish packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # Configure npm to use the token
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
+          
+          # Publish each package
+          for package_dir in packages/*/; do
+            if [ -f "$package_dir/package.json" ]; then
+              echo "Publishing $package_dir"
+              cd "$package_dir"
+              
+              # Check if package is private
+              if grep -q '"private": true' package.json; then
+                echo "Skipping private package"
+              else
+                # Publish with public access for scoped packages
+                npm publish --access public
+              fi
+              
+              cd ../..
+            fi
+          done
+      
+      - name: Summary
+        run: |
+          echo "## Published Packages" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          find packages -name "package.json" -type f | while read -r file; do
+            name=$(grep '"name":' "$file" | sed 's/.*"name": "\(.*\)".*/\1/')
+            version=$(grep '"version":' "$file" | sed 's/.*"version": "\(.*\)".*/\1/')
+            echo "- \`$name@$version\`" >> $GITHUB_STEP_SUMMARY
+          done
